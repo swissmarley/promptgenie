@@ -3,10 +3,10 @@ import { Book, Bot, Code, GalleryVertical, Home, Mic, Music, Play, Save, Setting
 
 // --- Models Data ---
 const PROVIDER_MODELS = {
-    Google: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-2.0-pro'],
-    OpenAI: ['gpt-4.1', 'gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo', 'gpt-o3-mini'],
-    Anthropic: ['claude-sonnet-4.0', 'claude-opus-4.0', 'claude-sonnet-3.7', 'claude-sonnet-3.5', 'claude-haiku-3.5'],
-    xAI: ['grok-3', 'grok-3-mini', 'grok-2'] // Placeholders, as xAI API is not public yet
+    Google: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'],
+    OpenAI: ['gpt-5', 'gpt-5-mini','o4-mini','o3-deep-research','gpt-4.1','gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+    Anthropic: ['claude-opus-4-1-20250805', 'claude-opus-4-20250514', 'claude-sonnet-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-5-haiku-20241022'],
+    xAI: ['grok-4-fast-reasoning' , 'grok-4-0709', 'grok-3', 'grok-3-mini', 'grok-2']
 };
 
 // Main App Component
@@ -266,6 +266,24 @@ const Playground = ({ initialSystemPrompt, prompts, apiKeys }) => {
     useEffect(() => { if(initialSystemPrompt) { setSystemPrompt(initialSystemPrompt); } }, [initialSystemPrompt]);
     useEffect(() => { setModel(PROVIDER_MODELS[provider][0]); }, [provider]);
 
+    // Utility function to safely extract message from API response
+    const extractMessage = (result) => {
+        const pathsToTry = [
+            'choices.0.message.content',
+            'candidates.0.content.parts.0.text',
+            'content.0.text',
+            'choices.0.delta.content'
+        ];
+
+        for (const path of pathsToTry) {
+            const message = path.split('.').reduce((o, k) => (o && o[k] !== undefined) ? o[k] : undefined, result);
+            if (message !== undefined) {
+                return message;
+            }
+        }
+        return undefined;
+    };
+
     const handleSendMessage = async () => {
         if (!userInput.trim()) return;
         setError(null);
@@ -284,18 +302,14 @@ const Playground = ({ initialSystemPrompt, prompts, apiKeys }) => {
         setUserInput('');
         setIsLoading(true);
 
-        const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
         let apiUrl = '';
         let apiPayload = {};
         let apiHeaders = { 'Content-Type': 'application/json' };
-        let responsePath = '';
 
         try {
-            let targetUrl = '';
             switch(provider) {
                 case 'Google':
-                    targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${currentApiKey}`;
-                    apiUrl = targetUrl; 
+                    apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${currentApiKey}`;
                     const googleHistory = updatedHistory.map(msg => ({ 
                         role: msg.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: msg.content }] 
@@ -307,25 +321,34 @@ const Playground = ({ initialSystemPrompt, prompts, apiKeys }) => {
                     if (systemPrompt && systemPrompt.trim()) {
                         apiPayload.systemInstruction = { parts: [{ text: systemPrompt }] };
                     }
-                    responsePath = 'candidates.0.content.parts.0.text';
                     break;
                 case 'OpenAI':
-                    targetUrl = 'https://api.openai.com/v1/chat/completions';
-                    apiUrl = `${CORS_PROXY}${encodeURIComponent(targetUrl)}`;
+                    apiUrl = '/api/openai/v1/chat/completions';
                     apiHeaders['Authorization'] = `Bearer ${currentApiKey}`;
-                    apiPayload = { 
-                        model, 
-                        messages: [{ role: 'system', content: systemPrompt }, ...updatedHistory], 
-                        temperature, 
-                        max_tokens: maxTokens 
-                    };
-                    responsePath = 'choices.0.message.content';
+                    
+                    // Conditional payload based on model
+                    const newModels = ['gpt-5', 'gpt-5-mini', 'o4-mini', 'o3-deep-research', 'gpt-4.1'];
+                    if (newModels.some(m => model.startsWith(m))) {
+                        apiPayload = { 
+                            model, 
+                            messages: [{ role: 'system', content: systemPrompt }, ...updatedHistory], 
+                            temperature: 1.0, 
+                            max_completion_tokens: maxTokens 
+                        };
+                    } else {
+                        apiPayload = { 
+                            model, 
+                            messages: [{ role: 'system', content: systemPrompt }, ...updatedHistory], 
+                            temperature, 
+                            max_tokens: maxTokens 
+                        };
+                    }
                     break;
                 case 'Anthropic':
-                    targetUrl = 'https://api.anthropic.com/v1/messages';
-                    apiUrl = `${CORS_PROXY}${encodeURIComponent(targetUrl)}`;
+                    apiUrl = '/api/anthropic/v1/messages';
                     apiHeaders['x-api-key'] = currentApiKey;
                     apiHeaders['anthropic-version'] = '2023-06-01';
+                    apiHeaders['anthropic-dangerous-direct-browser-access'] = 'true';
                     apiPayload = { 
                         model, 
                         system: systemPrompt, 
@@ -333,12 +356,17 @@ const Playground = ({ initialSystemPrompt, prompts, apiKeys }) => {
                         temperature, 
                         max_tokens: maxTokens 
                     };
-                    responsePath = 'content.0.text';
                     break;
                 case 'xAI':
-                    setError('xAI (Grok) API is not yet publicly available for this type of integration.');
-                    setIsLoading(false);
-                    return;
+                    apiUrl = '/api/xai/v1/chat/completions';
+                    apiHeaders['Authorization'] = `Bearer ${currentApiKey}`;
+                    apiPayload = {
+                        model,
+                        messages: [{ role: 'system', content: systemPrompt }, ...updatedHistory].filter(m => m.content), // xAI might not support empty system prompts
+                        temperature,
+                        max_tokens: maxTokens
+                    };
+                    break;
                 default:
                     throw new Error('Unsupported provider');
             }
@@ -357,7 +385,15 @@ const Playground = ({ initialSystemPrompt, prompts, apiKeys }) => {
             }
 
             const result = await response.json();
-            const message = responsePath.split('.').reduce((o, k) => (o && o[k] !== undefined) ? o[k] : undefined, result);
+
+            // Handle Google's safety feedback before trying to extract a message
+            if (provider === 'Google' && !result.candidates && result.promptFeedback) {
+                const blockReason = result.promptFeedback.blockReason;
+                const safetyRatings = result.promptFeedback.safetyRatings?.map(r => `${r.category}: ${r.probability}`).join(', ');
+                throw new Error(`Response blocked by Google. Reason: ${blockReason || 'Not specified'}. Details: ${safetyRatings || 'None'}`);
+            }
+            
+            const message = extractMessage(result);
 
             if (message !== undefined) {
                 setChatHistory(prev => [...prev, { role: 'assistant', content: message }]);
@@ -421,7 +457,7 @@ const Documentation = () => {
         { name: "Google Gemini", code: "const apiKey = 'YOUR_GOOGLE_API_KEY';\nconst model = 'gemini-1.5-flash';\nconst url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;\n\nconst payload = {\n  contents: [\n    { role: 'user', parts: [{ text: 'Hello, what is the capital of France?' }] }\n  ]\n};\n\nfetch(url, {\n  method: 'POST',\n  headers: { 'Content-Type': 'application/json' },\n  body: JSON.stringify(payload)\n});" },
         { name: "OpenAI", code: "const apiKey = 'YOUR_OPENAI_API_KEY';\nconst model = 'gpt-4o';\nconst url = 'https://api.openai.com/v1/chat/completions';\n\nconst payload = {\n  model,\n  messages: [\n    { role: 'system', content: 'You are a helpful assistant.' },\n    { role: 'user', content: 'Hello, what is the capital of France?' }\n  ]\n};\n\nfetch(url, {\n  method: 'POST',\n  headers: {\n    'Content-Type': 'application/json',\n    'Authorization': `Bearer ${apiKey}`\n  },\n  body: JSON.stringify(payload)\n});" },
         { name: "Anthropic Claude", code: "const apiKey = 'YOUR_ANTHROPIC_API_KEY';\nconst model = 'claude-3-haiku-20240307';\nconst url = 'https://api.anthropic.com/v1/messages';\n\nconst payload = {\n  model,\n  max_tokens: 1024,\n  messages: [\n    { role: 'user', content: 'Hello, what is the capital of France?' }\n  ]\n};\n\nfetch(url, {\n  method: 'POST',\n  headers: {\n    'Content-Type': 'application/json',\n    'x-api-key': apiKey,\n    'anthropic-version': '2023-06-01'\n  },\n  body: JSON.stringify(payload)\n});" },
-        { name: "xAI Grok", code: "// The xAI Grok API is not yet generally available for client-side applications.\n// The following is a conceptual example based on expected server-side usage.\n\nconst apiKey = 'YOUR_XAI_API_KEY';\nconst model = 'grok-2';\nconst url = 'https://api.x.ai/v1/chat/completions'; // Example URL\n\n/* \n  This would likely require a secure server-side implementation \n  due to authentication and CORS policies.\n*/" },
+        { name: "xAI Grok", code: "const apiKey = 'YOUR_XAI_API_KEY';\nconst model = 'grok-3-mini'; // Or another valid xAI model\nconst url = 'https://api.x.ai/v1/chat/completions';\n\nconst payload = {\n  model,\n  messages: [\n    { role: 'user', content: 'Explain the importance of low-latency in AI models.' }\n  ]\n};\n\nfetch(url, {\n  method: 'POST',\n  headers: {\n    'Content-Type': 'application/json',\n    'Authorization': `Bearer ${apiKey}`\n  },\n  body: JSON.stringify(payload)\n});" },
     ];
 
     const CodeBlock = ({ code }) => {
